@@ -62,11 +62,24 @@ export async function getProductsFromSheet(): Promise<Product[]> {
     throw new Error(errorMsg);
   }
 
-  console.log(`[Diagnostics] URL da planilha configurada: ${SHEET_CSV_URL.substring(0, 30)}...`);
+  // Garante que a URL termina com export?format=csv se for uma URL de planilha do Google
+  let fetchUrl = SHEET_CSV_URL;
+  if (fetchUrl.includes("docs.google.com/spreadsheets") && !fetchUrl.includes("export?format=csv")) {
+    if (fetchUrl.includes("/edit")) {
+      fetchUrl = fetchUrl.split("/edit")[0] + "/export?format=csv";
+    } else if (!fetchUrl.endsWith("/")) {
+      fetchUrl += "/export?format=csv";
+    }
+  }
+
+  console.log(`[Diagnostics] URL de fetch: ${fetchUrl.substring(0, 50)}...`);
 
   try {
-    const response = await fetch(SHEET_CSV_URL, {
+    const response = await fetch(fetchUrl, {
       next: { revalidate: 60 },
+      headers: {
+        'Cache-Control': 'no-cache'
+      }
     });
 
     console.log(`[Diagnostics] Status do fetch: ${response.status} ${response.statusText}`);
@@ -80,41 +93,72 @@ export async function getProductsFromSheet(): Promise<Product[]> {
     const csvText = await response.text();
     console.log(`[Diagnostics] Tamanho do CSV recebido: ${csvText.length} caracteres`);
     
-    const rows = parseCSV(csvText);
+    // Detecta o separador (vírgula ou ponto e vírgula)
+    const firstLine = csvText.split('\n')[0];
+    const separator = firstLine.includes(';') && !firstLine.includes(',') ? ';' : ',';
+    console.log(`[Diagnostics] Separador detectado: "${separator}"`);
+
+    const rows = parseCSV(csvText, separator);
     console.log(`[Diagnostics] Quantidade de linhas detectadas no CSV: ${rows.length}`);
 
     if (rows.length <= 1) {
       console.warn("[Diagnostics] Planilha parece estar vazia ou contém apenas o cabeçalho.");
+      if (csvText.toLowerCase().includes("<!doctype html>") || csvText.toLowerCase().includes("<html")) {
+        console.error("[Diagnostics] O conteúdo recebido parece ser HTML, não CSV. Verifique se a planilha está pública.");
+      }
       return [];
     }
+
+    // Log do cabeçalho para conferência
+    console.log(`[Diagnostics] Cabeçalho detectado: ${JSON.stringify(rows[0])}`);
 
     // Mapeia as linhas para o formato Product de forma eficiente
     const sheetProducts: Product[] = [];
     let processedCount = 0;
+    let skippedCount = 0;
     let errorCount = 0;
     
     // Pula o cabeçalho (index 0)
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
+      if (!row || row.length < 4) {
+        skippedCount++;
+        continue;
+      }
+
       try {
-        // Colunas esperadas: nome, categoria, descricao, preco_p, preco_m, preco_g, ativo, destaque, imagem, tags
+        // Ordem esperada: nome, categoria, descricao, preco_p, preco_m, preco_g, ativo, destaque, imagem, tags
         const [nome, categoria, descricao, precoPStr, precoMStr, precoGStr, ativo, destaque, imagem, tagsStr] = row;
 
-        if (!nome || typeof nome !== "string" || nome.trim() === "") continue;
+        if (!nome || typeof nome !== "string" || nome.trim() === "") {
+          skippedCount++;
+          continue;
+        }
         
-        const priceP = parseFloat((precoPStr || "").replace(",", "."));
-        const priceM = parseFloat((precoMStr || "").replace(",", "."));
-        const priceG = parseFloat((precoGStr || "").replace(",", "."));
+        const cleanPrice = (val: string) => {
+          if (!val) return NaN;
+          return parseFloat(String(val).replace("R$", "").replace(/\s/g, "").replace(".", "").replace(",", "."));
+        };
+
+        const priceP = cleanPrice(precoPStr);
+        const priceM = cleanPrice(precoMStr);
+        const priceG = cleanPrice(precoGStr);
 
         // Validação básica: pelo menos um preço deve ser válido
         const hasValidPrice = (!isNaN(priceP) && priceP > 0) || 
                              (!isNaN(priceM) && priceM > 0) || 
                              (!isNaN(priceG) && priceG > 0);
         
-        if (!hasValidPrice) continue;
+        if (!hasValidPrice) {
+          skippedCount++;
+          continue;
+        }
 
         const isActive = ativo?.toLowerCase().trim() === "sim";
-        if (!isActive) continue;
+        if (!isActive) {
+          skippedCount++;
+          continue;
+        }
 
         let tags: string[] = [];
         if (tagsStr) {
@@ -149,7 +193,7 @@ export async function getProductsFromSheet(): Promise<Product[]> {
       }
     }
 
-    console.log(`[Diagnostics] Processamento concluído: ${processedCount} produtos ativos, ${errorCount} erros de linha.`);
+    console.log(`[Diagnostics] Processamento concluído: ${processedCount} produtos ativos, ${skippedCount} pulados, ${errorCount} erros.`);
     return sheetProducts;
   } catch (error) {
     console.error("[Diagnostics] Erro fatal ao carregar produtos do CSV:", error);
@@ -160,7 +204,7 @@ export async function getProductsFromSheet(): Promise<Product[]> {
 /**
  * Parser simples de CSV que lida com aspas e vírgulas dentro de campos
  */
-function parseCSV(text: string): string[][] {
+function parseCSV(text: string, separator: string = ","): string[][] {
   const result: string[][] = [];
   let row: string[] = [];
   let col = "";
@@ -175,7 +219,7 @@ function parseCSV(text: string): string[][] {
       i++;
     } else if (char === '"') {
       inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
+    } else if (char === separator && !inQuotes) {
       row.push(col);
       col = "";
     } else if ((char === "\r" || char === "\n") && !inQuotes) {
