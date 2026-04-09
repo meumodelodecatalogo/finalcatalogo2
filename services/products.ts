@@ -54,27 +54,44 @@ export async function getProducts(): Promise<Product[]> {
  * Lógica de processamento do Google Sheets (executada apenas no servidor)
  */
 export async function getProductsFromSheet(): Promise<Product[]> {
+  console.log("[Diagnostics] Iniciando busca de produtos da planilha...");
+  
   if (!SHEET_CSV_URL) {
-    console.warn("NEXT_PUBLIC_SHEET_CSV_URL não configurada.");
-    return [];
+    const errorMsg = "NEXT_PUBLIC_SHEET_CSV_URL não configurada no ambiente.";
+    console.error(`[Diagnostics] Erro: ${errorMsg}`);
+    throw new Error(errorMsg);
   }
+
+  console.log(`[Diagnostics] URL da planilha configurada: ${SHEET_CSV_URL.substring(0, 30)}...`);
 
   try {
     const response = await fetch(SHEET_CSV_URL, {
       next: { revalidate: 60 },
     });
 
+    console.log(`[Diagnostics] Status do fetch: ${response.status} ${response.statusText}`);
+
     if (!response.ok) {
-      throw new Error("Falha ao buscar dados da planilha");
+      const errorMsg = `Falha ao buscar dados da planilha: ${response.status} ${response.statusText}`;
+      console.error(`[Diagnostics] Erro: ${errorMsg}`);
+      throw new Error(errorMsg);
     }
 
     const csvText = await response.text();
+    console.log(`[Diagnostics] Tamanho do CSV recebido: ${csvText.length} caracteres`);
+    
     const rows = parseCSV(csvText);
+    console.log(`[Diagnostics] Quantidade de linhas detectadas no CSV: ${rows.length}`);
 
-    if (rows.length <= 1) return [];
+    if (rows.length <= 1) {
+      console.warn("[Diagnostics] Planilha parece estar vazia ou contém apenas o cabeçalho.");
+      return [];
+    }
 
     // Mapeia as linhas para o formato Product de forma eficiente
     const sheetProducts: Product[] = [];
+    let processedCount = 0;
+    let errorCount = 0;
     
     // Pula o cabeçalho (index 0)
     for (let i = 1; i < rows.length; i++) {
@@ -125,14 +142,17 @@ export async function getProductsFromSheet(): Promise<Product[]> {
           active: true,
           tags
         });
+        processedCount++;
       } catch (err) {
-        console.error(`Erro na linha ${i + 1}:`, err);
+        errorCount++;
+        console.error(`[Diagnostics] Erro na linha ${i + 1}:`, err);
       }
     }
 
+    console.log(`[Diagnostics] Processamento concluído: ${processedCount} produtos ativos, ${errorCount} erros de linha.`);
     return sheetProducts;
   } catch (error) {
-    console.error("Erro ao carregar produtos do CSV:", error);
+    console.error("[Diagnostics] Erro fatal ao carregar produtos do CSV:", error);
     throw error;
   }
 }
